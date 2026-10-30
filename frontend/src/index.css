@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mascote bounce animation */
+@keyframes mascote-bounce {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-6px); }
+}
+.mascote-bounce {
+  animation: mascote-bounce 1.6s ease-in-out infinite;
+}
+
+/* Mascote pulse animation (alerta) */
+@keyframes mascote-pulse-scale {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.12); }
+}
+.mascote-alert {
+  animation: mascote-pulse-scale 0.7s ease-in-out infinite;
+}
