@@ -244,11 +244,39 @@ def _mock_llm_stub(prompt: str) -> str:
     elif any(w in utterance for w in ["extrato", "esse debito", "esse gasto", "cobrado", "reconhec"]):
         intent, entities = "STATEMENT_REVIEW", {}
     elif "pix" in utterance or "transferi" in utterance or "mandar" in utterance or "manda" in utterance or "enviar" in utterance:
-        val_match = re.search(r"(\d+[\.,]?\d*)\s*(?:reais?|conto|r\$)?", utterance)
+        # --- Detecta chave Pix explícita ANTES de capturar valor genérico ---
+        # CPF: 000.000.000-00 | CNPJ | e-mail | telefone +55 | chave aleatória (UUID)
+        chave_pix_re = re.compile(
+            r"""(?xi)
+            (
+              \d{3}[.\s]?\d{3}[.\s]?\d{3}[-\s]?\d{2}   # CPF
+            | \d{2}[.\s]?\d{3}[.\s]?\d{3}[/.\s]?\d{4}[-\s]?\d{2}  # CNPJ
+            | [\w.+-]+@[\w.-]+\.[a-z]{2,}               # e-mail
+            | (?:\+?55\s?)?\(?\d{2}\)?\s?\d{4,5}[-\s]?\d{4}  # telefone
+            | [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}  # UUID
+            )
+            """,
+            re.IGNORECASE
+        )
+        chave_match = chave_pix_re.search(utterance)
+        pix_key = chave_match.group(1).strip() if chave_match else None
+
+        # Valor monetário — se não achar antes da chave, busca no texto todo
+        val_text = utterance[:chave_match.start()] if chave_match else utterance
+        val_match = re.search(r"(\d+[\.,]?\d*)\s*(?:reais?|conto|r\$)?", val_text)
         value = float(val_match.group(1).replace(",", ".")) if val_match else 0.0
+
         name_match = re.search(r"(?:para|pro|pra|p/)\s+(?:o |a |os |as |ao )?([a-z\u00e0-\u00fc ]+)", utterance)
-        raw_name = name_match.group(1).strip().title() if name_match else None
-        intent, entities = "PIX_TRANSFER", {"amount": value, "recipient_raw": raw_name}
+        raw_name   = name_match.group(1).strip().title() if name_match else None
+
+        # Se a "chave" for parte do nome (ex: "pro pedro") — não conta como chave Pix
+        if pix_key and raw_name and pix_key.lower() in raw_name.lower():
+            pix_key = None
+
+        if pix_key:
+            intent, entities = "PIX_CHAVE", {"amount": value, "pix_key": pix_key}
+        else:
+            intent, entities = "PIX_TRANSFER", {"amount": value, "recipient_raw": raw_name}
     elif any(w in utterance for w in ["cartao", "perdi", "onibus", "roubei", "bloqueio"]):
         intent, entities = "BLOCK_CARD", {"card_last4": "4321"}
     elif any(w in utterance for w in ["pedro silva", "silva"]) and "pedro" in utterance:
@@ -417,6 +445,32 @@ def node_operador_ui(state: AgentState) -> AgentState:
                 },
             },
             "security_guardian": {"risk_level": "LOW", "is_blocked": False, "scam_explanation": None, "trusted_contact_alert": False},
+        }
+    elif intent == "PIX_CHAVE":
+        pix_key = entities.get("pix_key", "chave informada")
+        amount  = entities.get("amount") or 0
+        state["session"]["last_amount"] = amount
+        state["session"]["pending_disambiguation"] = f"pix_chave:{pix_key}"
+        state["response"] = {
+            "metadata": {"active_agent": "OPERADOR_UI", "intent_detected": "PIX_TRANSFER", "confidence_score": state["confidence"], "risk_score": None},
+            "voice_assistant": {
+                "tts_message": f"Encontrei a chave Pix {pix_key}. Nao reconheco esse contato na sua agenda. Quer confirmar o envio de R$ {amount:.0f} para essa chave?",
+                "should_listen_next": True,
+            },
+            "ui_control": {
+                "target_screen": "PIX_AREA", "ui_mode": "ZERO_UI_HIGH_CONTRAST",
+                "form_state": {"amount": amount, "recipient_key": pix_key},
+                "zero_ui_Dynamic_Component": {
+                    "title": "🔑 Chave Pix Encontrada",
+                    "subtitle": f"Chave: {pix_key}  —  Destinatário fora da agenda",
+                    "options": [
+                        {"id": "confirm_key", "label": f"✅ SIM, ENVIAR R$ {amount:.0f} PARA ESSA CHAVE", "action_Command": f"Confirmar Pix chave {pix_key}"},
+                        {"id": "cancel_key",  "label": "❌ NÃO, CANCELAR",                                "action_Command": "Voltar ao início"},
+                    ],
+                    "primary_confirm_button": None,
+                },
+            },
+            "security_guardian": {"risk_level": "MEDIUM", "is_blocked": False, "scam_explanation": "Chave Pix nao encontrada na agenda de contatos conhecidos.", "trusted_contact_alert": False},
         }
     elif intent == "HOME_NAVIGATION":
         state["response"] = _home_response()
@@ -716,12 +770,12 @@ def route_intent(state: AgentState) -> Literal["operador_ui", "visao_multimodal"
     intent = state["intent"]; image = state.get("image_context")
     if image and image.startswith("FOTO"):
         return "visao_multimodal"
-    if intent in ("PIX_TRANSFER", "PIX_CONFIRM", "SCAM_RISK"):
+    if intent in ("PIX_TRANSFER", "PIX_CONFIRM", "PIX_CHAVE", "SCAM_RISK"):
         risk = calculate_risk_score(state["user_input"], state["entities"], state["profile"], state["session"])
         state["risk"] = risk
         if risk["level"] in ("CRITICAL", "HIGH", "MEDIUM"):
             state["intent"] = "SCAM_RISK"; return "guardiao_antigolpe"
-    return {"PIX_TRANSFER": "operador_ui", "PIX_DISAMBIGUATION": "operador_ui", "PIX_CONFIRM": "operador_ui", "BLOCK_CARD": "operador_ui", "PAY_BILL": "visao_multimodal", "SCAM_RISK": "guardiao_antigolpe", "STATEMENT_REVIEW": "extrato", "HOME_NAVIGATION": "home", "CLARIFICATION_NEEDED": "esclarecimento"}.get(intent, "esclarecimento")
+    return {"PIX_TRANSFER": "operador_ui", "PIX_DISAMBIGUATION": "operador_ui", "PIX_CONFIRM": "operador_ui", "PIX_CHAVE": "operador_ui", "BLOCK_CARD": "operador_ui", "PAY_BILL": "visao_multimodal", "SCAM_RISK": "guardiao_antigolpe", "STATEMENT_REVIEW": "extrato", "HOME_NAVIGATION": "home", "CLARIFICATION_NEEDED": "esclarecimento"}.get(intent, "esclarecimento")
 
 def build_graph():
     g = StateGraph(AgentState)

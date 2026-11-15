@@ -78,8 +78,13 @@ export default function AssistenteCarameloApp() {
   // Câmera
   const [cameraOpen, setCameraOpen]       = useState(false);
   const [cameraMode, setCameraMode]       = useState('boleto'); // 'boleto' | 'qrcode'
+  // Histórico de chat exibido no celular mock
+  const [chatHistory, setChatHistory]     = useState([
+    { role: 'assistant', text: `Olá, ${DEMO_PROFILES[0].label.split(',')[0]}! Sou o Assistente Caramelo. Digite ou fale o que você precisa fazer.` }
+  ]);
 
-  const inputRef = useRef(null);
+  const inputRef    = useRef(null);
+  const chatEndRef  = useRef(null); // âncora para auto-scroll
 
   // =========================================================================
   // TTS — fala e exibe legenda ao mesmo tempo
@@ -98,6 +103,11 @@ export default function AssistenteCarameloApp() {
     }
   }, [agentState.voice_assistant.tts_message, ttsEnabled]);
 
+  // Auto-scroll do chat para a mensagem mais recente
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
+
   // =========================================================================
   // RESET DE SESSÃO
   // =========================================================================
@@ -108,8 +118,9 @@ export default function AssistenteCarameloApp() {
     if (clearStorage) {
       localStorage.removeItem('bb_camalao_session_id');
     }
-    // Usa perfil ativo para personalizar a saudação
+    const firstName = activeProfile.label.split(',')[0];
     setAgentState(makeInitialState(activeProfile.label));
+    setChatHistory([{ role: 'assistant', text: `Olá, ${firstName}! Sou o Assistente Caramelo. Digite ou fale o que você precisa fazer.` }]);
     setApiError(null);
     setTtsCaption("");
   }, [activeProfile]);
@@ -125,8 +136,9 @@ export default function AssistenteCarameloApp() {
     try {
       await fetch(`${API_URL}/api/session/${SESSION_ID}`, { method: 'DELETE' });
     } catch (_) {}
-    // Atualiza estado com saudação personalizada para o novo perfil
+    const firstName = profile.label.split(',')[0];
     setAgentState(makeInitialState(profile.label));
+    setChatHistory([{ role: 'assistant', text: `Olá, ${firstName}! Sou o Assistente Caramelo. Digite ou fale o que você precisa fazer.` }]);
     setApiError(null);
     setTtsCaption("");
   }, []);
@@ -138,6 +150,14 @@ export default function AssistenteCarameloApp() {
   const callBackend = useCallback(async (commandText, imageContext = null, imageBase64 = null) => {
     setIsLoading(true);
     setApiError(null);
+
+    // Adiciona mensagem do usuário imediatamente no chat (só se for texto real, não comandos internos)
+    if (!imageContext) {
+      setChatHistory(h => [...h, { role: 'user', text: commandText }]);
+    } else {
+      const label = imageContext === 'FOTO_QRCODE_PIX' ? '📷 Leitura de QR Code Pix' : '📷 Leitura de Boleto / Conta';
+      setChatHistory(h => [...h, { role: 'user', text: label }]);
+    }
 
     try {
       const res = await fetch(`${API_URL}/api/agent/interact`, {
@@ -155,8 +175,11 @@ export default function AssistenteCarameloApp() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setAgentState(data);
+      // Adiciona resposta do assistente no chat
+      setChatHistory(h => [...h, { role: 'assistant', text: data.voice_assistant.tts_message }]);
     } catch (err) {
       setApiError(`Sem conexão com o servidor (${err.message}). Verifique se o backend está rodando.`);
+      setChatHistory(h => [...h, { role: 'assistant', text: '⚠️ Não consegui conectar ao servidor. Tente novamente.' }]);
     } finally {
       setIsLoading(false);
       setUserInput("");
@@ -287,40 +310,64 @@ export default function AssistenteCarameloApp() {
         )}
 
         {/* CORPO PRINCIPAL */}
-        <div className="flex-1 overflow-y-auto flex flex-col justify-between">
+        <div className="flex-1 overflow-y-auto flex flex-col justify-between min-h-0">
 
-          {/* MODO PADRÃO */}
+          {/* MODO PADRÃO — chat + grade de serviços mini */}
           {ui_control.ui_mode === "STANDARD" && (
-            <div className="p-4 space-y-4">
-              <div className="bg-slate-100 p-4 rounded-xl border border-slate-200">
+            <div className="flex flex-col h-full">
+              {/* Saldo mini */}
+              <div className="mx-3 mt-3 bg-slate-100 px-4 py-2.5 rounded-xl border border-slate-200 flex items-center justify-between shrink-0">
                 <p className="text-xs text-slate-500">Saldo disponível</p>
-                <p className="text-2xl font-extrabold text-[#0038A8] mt-1">R$ 1.450,00</p>
+                <p className="text-lg font-extrabold text-[#0038A8]">R$ 1.450,00</p>
               </div>
 
-              <div>
-                <p className="text-xs font-bold text-slate-400 uppercase mb-2">Serviços</p>
-                <div className="grid grid-cols-3 gap-2.5 text-center" role="list">
-                  {[
-                    { icon: "💸", name: "Área Pix" },
-                    { icon: "📄", name: "Pagar Boleto" },
-                    { icon: "💳", name: "Cartões" },
-                    { icon: "📋", name: "Extrato" },
-                    { icon: "💰", name: "Empréstimo" },
-                    { icon: "📊", name: "Investir" },
-                    { icon: "🛡️", name: "Seguros" },
-                    { icon: "👵", name: "INSS" },
-                    { icon: "⚙️", name: "Ajustes" },
-                  ].map((item, idx) => (
-                    <div key={idx} role="listitem" className="bg-slate-50 border border-slate-200 p-3 rounded-xl flex flex-col items-center justify-center gap-1 opacity-85">
-                      <span className="text-xl" aria-hidden="true">{item.icon}</span>
-                      <span className="text-[11px] font-medium text-slate-700">{item.name}</span>
+              {/* Grade de serviços — compacta, apenas atalhos visuais */}
+              <div className="grid grid-cols-5 gap-1.5 px-3 pt-2 shrink-0">
+                {[
+                  { icon: "💸", name: "Pix" },
+                  { icon: "📄", name: "Boleto" },
+                  { icon: "💳", name: "Cartão" },
+                  { icon: "📋", name: "Extrato" },
+                  { icon: "⚙️", name: "Mais" },
+                ].map((item, idx) => (
+                  <div key={idx} className="bg-slate-50 border border-slate-200 p-2 rounded-xl flex flex-col items-center gap-0.5">
+                    <span className="text-base" aria-hidden="true">{item.icon}</span>
+                    <span className="text-[9px] font-medium text-slate-600">{item.name}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* ── CHAT HISTÓRICO ── */}
+              <div
+                className="flex-1 overflow-y-auto px-3 py-2 space-y-2 min-h-0"
+                aria-live="polite"
+                aria-label="Histórico de conversa com o assistente"
+              >
+                {chatHistory.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm leading-snug shadow-sm ${
+                      msg.role === 'user'
+                        ? 'bg-[#0038A8] text-white rounded-br-sm'
+                        : 'bg-slate-100 text-slate-900 rounded-bl-sm border border-slate-200'
+                    }`}>
+                      {msg.text}
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-blue-50 border border-blue-200 p-3 rounded-xl text-xs text-blue-900">
-                💡 <strong>Dica:</strong> Aperte o microfone abaixo e diga o que precisa!
+                  </div>
+                ))}
+                {/* Indicador de digitação */}
+                {isLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-slate-100 border border-slate-200 px-4 py-2.5 rounded-2xl rounded-bl-sm flex gap-1 items-center">
+                      <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{animationDelay:'0ms'}} />
+                      <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{animationDelay:'150ms'}} />
+                      <span className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{animationDelay:'300ms'}} />
+                    </div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
               </div>
             </div>
           )}
@@ -442,47 +489,70 @@ export default function AssistenteCarameloApp() {
             </div>
           )}
 
-          {/* Mascote flutuante (apenas nos modos não-emergência) */}
-          {!isEmergency && (
-            <div className="absolute bottom-20 right-3 pointer-events-none" aria-hidden="true">
-              <MascoteAvatar mood={mascoteMood} size={64} />
+          {/* Mascote flutuante — só no modo padrão e não emergência */}
+          {!isEmergency && ui_control.ui_mode === "STANDARD" && (
+            <div className="absolute bottom-[72px] right-3 pointer-events-none" aria-hidden="true">
+              <MascoteAvatar mood={mascoteMood} size={52} />
             </div>
           )}
 
-          {/* Barra de entrada: voz + câmera */}
-          <div className="p-3 bg-slate-100 border-t border-slate-200 flex flex-col gap-2">
-            <div className="flex gap-2">
+          {/* ── BARRA DE ENTRADA: texto inline + voz + câmera ── */}
+          <div className="shrink-0 px-2 py-2 bg-white border-t border-slate-200 flex flex-col gap-1.5">
+            {/* Campo de texto + enviar */}
+            <div className="flex gap-1.5 items-center">
+              <input
+                ref={inputRef}
+                type="text"
+                value={userInput}
+                onChange={(e) => setUserInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && userInput.trim() && !isLoading) {
+                    callBackend(userInput.trim());
+                  }
+                }}
+                placeholder="Digite o que precisa…"
+                disabled={isLoading}
+                aria-label="Digite sua mensagem para o assistente"
+                className="flex-1 bg-slate-100 border border-slate-300 rounded-full px-4 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0038A8] disabled:opacity-50"
+              />
+              <button
+                onClick={() => userInput.trim() && !isLoading && callBackend(userInput.trim())}
+                disabled={isLoading || !userInput.trim()}
+                aria-label="Enviar mensagem"
+                className="w-9 h-9 rounded-full bg-[#0038A8] text-white flex items-center justify-center disabled:opacity-40 shrink-0"
+              >
+                ➤
+              </button>
+            </div>
+            {/* Linha de ações rápidas: voz + câmera */}
+            <div className="flex gap-1.5">
               <button
                 onClick={startVoiceCapture}
                 disabled={isLoading}
-                aria-label={isListening ? "Ouvindo sua voz…" : "Falar com o assistente"}
-                className={`flex-1 py-3 rounded-xl font-extrabold text-sm flex items-center justify-center gap-2 shadow transition ${
+                aria-label={isListening ? "Ouvindo…" : "Falar com o assistente"}
+                className={`flex-1 py-2 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition ${
                   isListening ? "bg-red-600 text-white animate-pulse" :
-                  isLoading   ? "bg-slate-400 text-white cursor-wait" :
+                  isLoading   ? "bg-slate-300 text-slate-500 cursor-wait" :
                                 "bg-[#0038A8] text-white"
                 }`}
               >
-                🎙️ {isListening ? "Ouvindo…" : isLoading ? "Aguarde…" : "Falar com o BB"}
+                🎙️ {isListening ? "Ouvindo…" : "Voz"}
               </button>
-              {/* Botão câmera boleto */}
               <button
                 onClick={() => { setCameraMode('boleto'); setCameraOpen(true); }}
                 disabled={isLoading}
-                className="px-4 py-3 bg-[#F8D117] text-[#0038A8] rounded-xl font-extrabold text-sm shadow disabled:opacity-50"
-                aria-label="Abrir câmera para ler boleto ou conta"
-                title="Câmera — Boleto / Conta de Luz"
+                className="px-4 py-2 bg-[#F8D117] text-[#0038A8] rounded-xl font-bold text-xs disabled:opacity-50"
+                title="Câmera — Boleto"
               >
-                📷
+                📷 Boleto
               </button>
-              {/* Botão câmera QR Code */}
               <button
                 onClick={() => { setCameraMode('qrcode'); setCameraOpen(true); }}
                 disabled={isLoading}
-                className="px-4 py-3 bg-slate-200 text-slate-800 rounded-xl font-extrabold text-sm shadow disabled:opacity-50"
-                aria-label="Abrir câmera para ler QR Code Pix"
-                title="Câmera — QR Code Pix"
+                className="px-4 py-2 bg-slate-100 text-slate-700 border border-slate-300 rounded-xl font-bold text-xs disabled:opacity-50"
+                title="Câmera — QR Pix"
               >
-                ◼
+                ◼ Pix QR
               </button>
             </div>
           </div>
@@ -590,6 +660,15 @@ export default function AssistenteCarameloApp() {
             >
               <span className="text-xs font-bold text-teal-300 block">Ato 6: Visão — QR Code Pix</span>
               <span className="text-sm font-semibold text-white">📷 Câmera → QR Code Pix</span>
+            </button>
+
+            <button
+              onClick={() => callBackend("Quero fazer um Pix de 120 reais para a chave CPF 123.456.789-00")}
+              disabled={isLoading}
+              className="p-3 bg-orange-600/20 hover:bg-orange-600/30 border border-orange-400/40 rounded-xl text-left transition disabled:opacity-50"
+            >
+              <span className="text-xs font-bold text-orange-300 block">Ato 7: Pix por Chave Desconhecida</span>
+              <span className="text-sm font-semibold text-white">"Pix R$120 para CPF desconhecido"</span>
             </button>
           </div>
         </div>
