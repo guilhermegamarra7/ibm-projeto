@@ -1,37 +1,83 @@
 // arquivo: src/App.jsx
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import MascoteAvatar from './MascoteAvatar';
+import CameraModal from './CameraModal';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-// ID de sessão único por aba (mantém contexto de conversa entre requests)
-const SESSION_ID = `session_${Date.now()}`;
+// ID de sessão único por aba — persiste no localStorage para sobreviver a reloads
+const SESSION_ID = (() => {
+  const key = 'bb_camalao_session_id';
+  const existing = localStorage.getItem(key);
+  if (existing) return existing;
+  const id = `session_${Date.now()}`;
+  localStorage.setItem(key, id);
+  return id;
+})();
 
-const INITIAL_STATE = {
-  metadata: { active_agent: "ORQUESTRADOR", intent_detected: "IDLE", confidence_score: 1.0 },
-  voice_assistant: {
-    tts_message: "Olá, Dona Maria! Sou o Assistente Caramelo do Banco do Brasil. Você pode falar comigo ou mostrar uma conta pela câmera.",
-    should_listen_next: false,
-  },
-  ui_control: {
-    target_screen: "HOME",
-    ui_mode: "STANDARD",
-    form_state: { amount: null, recipient_name: null, recipient_key: null, barcode: null, card_status: "ACTIVE" },
-    zero_ui_Dynamic_Component: null,
-  },
-  security_guardian: { risk_level: "LOW", is_blocked: false, scam_explanation: null, trusted_contact_alert: false },
+// Perfis disponíveis para demo (espelha o backend)
+const DEMO_PROFILES = [
+  { id: 'dona_maria', label: 'Dona Maria, 72a', emoji: '👵', description: 'Aposentada, baixa familiaridade digital' },
+  { id: 'sr_joao',   label: 'Sr. João, 68a',   emoji: '👴', description: 'Autônomo, contatos conhecidos' },
+  { id: 'ana',       label: 'Ana, 34a',          emoji: '👩', description: 'Jovem, sem contato de confiança' },
+];
+
+// Saudação inicial personalizada com o nome do perfil ativo
+function makeInitialState(profileLabel) {
+  const firstName = profileLabel ? profileLabel.split(',')[0] : 'você';
+  return {
+    metadata: { active_agent: "ORQUESTRADOR", intent_detected: "IDLE", confidence_score: 1.0 },
+    voice_assistant: {
+      tts_message: `Olá, ${firstName}! Sou o Assistente Caramelo do Banco do Brasil. Você pode falar comigo ou mostrar uma conta pela câmera.`,
+      should_listen_next: false,
+    },
+    ui_control: {
+      target_screen: "HOME",
+      ui_mode: "STANDARD",
+      form_state: { amount: null, recipient_name: null, recipient_key: null, barcode: null, card_status: "ACTIVE" },
+      zero_ui_Dynamic_Component: null,
+    },
+    security_guardian: { risk_level: "LOW", is_blocked: false, scam_explanation: null, trusted_contact_alert: false },
+  };
+}
+
+const RISK_LABELS = {
+  LOW:      'Baixo',
+  MEDIUM:   'Médio',
+  HIGH:     'Alto',
+  CRITICAL: 'Crítico',
 };
 
+// Nomes amigáveis para exibição ao usuário
+const AGENT_LABELS = {
+  ORQUESTRADOR:       'Assistente Caramelo',
+  OPERADOR_UI:        'Assistente Caramelo',
+  VISAO_MULTIMODAL:   'Assistente Caramelo — Visão',
+  GUARDIAO_ANTIGOLPE: 'Guardião Antigolpe BB',
+  EXTRATO:            'Assistente Caramelo',
+  HOME:               'Assistente Caramelo',
+  ESCLARECIMENTO:     'Assistente Caramelo',
+};
+
+function agentLabel(active_agent) {
+  return AGENT_LABELS[active_agent] ?? 'Assistente Caramelo';
+}
+
 export default function AssistenteCarameloApp() {
-  const [agentState, setAgentState]   = useState(INITIAL_STATE);
-  const [userInput, setUserInput]     = useState("");
-  const [isListening, setIsListening] = useState(false);
-  const [isLoading, setIsLoading]     = useState(false);
-  const [ttsEnabled, setTtsEnabled]   = useState(true);
+  const [agentState, setAgentState]       = useState(() => makeInitialState(DEMO_PROFILES[0].label));
+  const [userInput, setUserInput]         = useState("");
+  const [isListening, setIsListening]     = useState(false);
+  const [isLoading, setIsLoading]         = useState(false);
+  const [ttsEnabled, setTtsEnabled]       = useState(true);
   // Legenda do TTS — acessibilidade auditiva
-  const [ttsCaption, setTtsCaption]   = useState("");
+  const [ttsCaption, setTtsCaption]       = useState("");
   // Erro de conectividade
-  const [apiError, setApiError]       = useState(null);
+  const [apiError, setApiError]           = useState(null);
+  // Perfil ativo na demo
+  const [activeProfile, setActiveProfile] = useState(DEMO_PROFILES[0]);
+  // Câmera
+  const [cameraOpen, setCameraOpen]       = useState(false);
+  const [cameraMode, setCameraMode]       = useState('boleto'); // 'boleto' | 'qrcode'
 
   const inputRef = useRef(null);
 
@@ -53,9 +99,43 @@ export default function AssistenteCarameloApp() {
   }, [agentState.voice_assistant.tts_message, ttsEnabled]);
 
   // =========================================================================
-  // CHAMADA AO BACKEND (fonte única de verdade — sem lógica duplicada)
+  // RESET DE SESSÃO
   // =========================================================================
-  const callBackend = useCallback(async (commandText, imageContext = null) => {
+  const resetSession = useCallback(async (clearStorage = true) => {
+    try {
+      await fetch(`${API_URL}/api/session/${SESSION_ID}`, { method: 'DELETE' });
+    } catch (_) { /* ok, sessão pode não existir */ }
+    if (clearStorage) {
+      localStorage.removeItem('bb_camalao_session_id');
+    }
+    // Usa perfil ativo para personalizar a saudação
+    setAgentState(makeInitialState(activeProfile.label));
+    setApiError(null);
+    setTtsCaption("");
+  }, [activeProfile]);
+
+  // =========================================================================
+  // TROCA DE PERSONA (demo)
+  // =========================================================================
+  const switchProfile = useCallback(async (profile) => {
+    setActiveProfile(profile);
+    try {
+      await fetch(`${API_URL}/api/session/${SESSION_ID}/change_profile?profile_id=${profile.id}`, { method: 'POST' });
+    } catch (_) {}
+    try {
+      await fetch(`${API_URL}/api/session/${SESSION_ID}`, { method: 'DELETE' });
+    } catch (_) {}
+    // Atualiza estado com saudação personalizada para o novo perfil
+    setAgentState(makeInitialState(profile.label));
+    setApiError(null);
+    setTtsCaption("");
+  }, []);
+
+  // =========================================================================
+  // CHAMADA AO BACKEND (fonte única de verdade — sem lógica duplicada)
+  // Aceita image_base64 (câmera real) além de image_context (simulação)
+  // =========================================================================
+  const callBackend = useCallback(async (commandText, imageContext = null, imageBase64 = null) => {
     setIsLoading(true);
     setApiError(null);
 
@@ -67,6 +147,7 @@ export default function AssistenteCarameloApp() {
           user_input: commandText,
           current_screen: agentState.ui_control.target_screen,
           image_context: imageContext,
+          image_base64: imageBase64,
           session_id: SESSION_ID,
         }),
       });
@@ -81,6 +162,22 @@ export default function AssistenteCarameloApp() {
       setUserInput("");
     }
   }, [agentState.ui_control.target_screen]);
+
+  // =========================================================================
+  // CALLBACK DA CÂMERA REAL
+  // =========================================================================
+  const handleCameraCapture = useCallback((base64DataURL, mode) => {
+    // Se não houver imagem (câmera bloqueada), cai no mock
+    if (!base64DataURL) {
+      const ctx  = mode === 'qrcode' ? 'FOTO_QRCODE_PIX' : 'FOTO_CONTA_LUZ';
+      const text = mode === 'qrcode' ? 'Ler QR Code Pix' : 'Ler conta de luz';
+      callBackend(text, ctx, null);
+      return;
+    }
+    const text = mode === 'qrcode' ? 'Analise o QR Code Pix nesta imagem' : 'Analise o boleto ou conta nesta imagem';
+    // Passa base64 completo (data:image/jpeg;base64,...)
+    callBackend(text, mode === 'qrcode' ? 'FOTO_QRCODE_PIX' : 'FOTO_CONTA_LUZ', base64DataURL);
+  }, [callBackend]);
 
   // =========================================================================
   // RECONHECIMENTO DE VOZ (Web Speech API nativa)
@@ -105,18 +202,6 @@ export default function AssistenteCarameloApp() {
     recognition.start();
   };
 
-  // =========================================================================
-  // RESET DE SESSÃO
-  // =========================================================================
-  const resetSession = async () => {
-    try {
-      await fetch(`${API_URL}/api/session/${SESSION_ID}`, { method: 'DELETE' });
-    } catch (_) { /* ok, sessão pode não existir */ }
-    setAgentState(INITIAL_STATE);
-    setApiError(null);
-    setTtsCaption("");
-  };
-
   const { ui_control, voice_assistant, metadata, security_guardian } = agentState;
 
   // Mood do mascote derivado do estado do agente
@@ -132,7 +217,9 @@ export default function AssistenteCarameloApp() {
     if (intent === 'BLOCK_CARD')          return 'BLOCK_CARD';
     if (intent === 'SCAM_INTERVENTION')   return 'SCAM_INTERVENTION';
     if (intent === 'RISK_WARNING')        return 'GUARDIAO_ANTIGOLPE';
+    if (intent === 'RISK_NOTICE')         return 'GUARDIAO_ANTIGOLPE';
     if (intent === 'PAY_BILL')            return 'PAY_BILL';
+    if (intent === 'STATEMENT_REVIEW')    return 'dando_dica';
     if (agent  === 'OPERADOR_UI')         return 'OPERADOR_UI';
     return 'idle';
   })();
@@ -155,10 +242,10 @@ export default function AssistenteCarameloApp() {
         <div className="bg-[#F8D117] text-[#0038A8] px-5 pt-6 pb-4 flex items-center justify-between font-bold shadow-sm">
           <div>
             <p className="text-xs uppercase tracking-wider opacity-80">Banco do Brasil</p>
-            <h1 className="text-lg font-extrabold">Olá, Dona Maria</h1>
+            <h1 className="text-lg font-extrabold">Olá, {activeProfile.label.split(',')[0]}</h1>
           </div>
           <span className={`text-xs px-2.5 py-1 rounded-full font-semibold ${isZeroUI ? 'bg-[#0038A8] text-white' : 'bg-black/10 text-[#0038A8]'}`}>
-            {isZeroUI ? '🦎 Zero-UI Ativa' : 'UI Padrão'}
+            {isZeroUI ? '♿ Zero-UI Ativa' : 'UI Padrão'}
           </span>
         </div>
 
@@ -176,7 +263,7 @@ export default function AssistenteCarameloApp() {
             />
             <div className="text-xs leading-relaxed">
               <span className="font-bold text-[#F8D117] block mb-0.5">
-                {metadata.active_agent}
+                {agentLabel(metadata.active_agent)}
                 {isLoading && <span className="ml-2 opacity-70 animate-pulse">· processando…</span>}
               </span>
               {/* Legenda visível do que foi falado — acessibilidade auditiva */}
@@ -187,7 +274,7 @@ export default function AssistenteCarameloApp() {
           {/* Indicador de risco (visível sempre que não for LOW) */}
           {security_guardian.risk_level !== "LOW" && (
             <div className={`text-xs font-bold px-2 py-1 rounded-lg ${security_guardian.risk_level === "CRITICAL" ? "bg-red-700" : "bg-yellow-600 text-black"}`}>
-              Risco {security_guardian.risk_level} · {security_guardian.scam_explanation?.split('.')[0]}
+              Risco {RISK_LABELS[security_guardian.risk_level] ?? security_guardian.risk_level} · {security_guardian.scam_explanation?.split('.')[0]}
             </div>
           )}
         </div>
@@ -214,12 +301,12 @@ export default function AssistenteCarameloApp() {
                 <p className="text-xs font-bold text-slate-400 uppercase mb-2">Serviços</p>
                 <div className="grid grid-cols-3 gap-2.5 text-center" role="list">
                   {[
-                    { icon: "💠", name: "Área Pix" },
+                    { icon: "💸", name: "Área Pix" },
                     { icon: "📄", name: "Pagar Boleto" },
                     { icon: "💳", name: "Cartões" },
-                    { icon: "📊", name: "Extrato" },
+                    { icon: "📋", name: "Extrato" },
                     { icon: "💰", name: "Empréstimo" },
-                    { icon: "📈", name: "Investir" },
+                    { icon: "📊", name: "Investir" },
                     { icon: "🛡️", name: "Seguros" },
                     { icon: "👵", name: "INSS" },
                     { icon: "⚙️", name: "Ajustes" },
@@ -272,7 +359,7 @@ export default function AssistenteCarameloApp() {
                     aria-label={opt.label}
                   >
                     <span>{opt.label}</span>
-                    <span className="text-2xl" aria-hidden="true">➔</span>
+                    <span className="text-2xl" aria-hidden="true">→</span>
                   </button>
                 ))}
 
@@ -377,13 +464,25 @@ export default function AssistenteCarameloApp() {
               >
                 🎙️ {isListening ? "Ouvindo…" : isLoading ? "Aguarde…" : "Falar com o BB"}
               </button>
+              {/* Botão câmera boleto */}
               <button
-                onClick={() => callBackend("Ler conta de luz", "FOTO_CONTA_LUZ")}
+                onClick={() => { setCameraMode('boleto'); setCameraOpen(true); }}
                 disabled={isLoading}
                 className="px-4 py-3 bg-[#F8D117] text-[#0038A8] rounded-xl font-extrabold text-sm shadow disabled:opacity-50"
-                aria-label="Simular leitura de boleto pela câmera"
+                aria-label="Abrir câmera para ler boleto ou conta"
+                title="Câmera — Boleto / Conta de Luz"
               >
                 📷
+              </button>
+              {/* Botão câmera QR Code */}
+              <button
+                onClick={() => { setCameraMode('qrcode'); setCameraOpen(true); }}
+                disabled={isLoading}
+                className="px-4 py-3 bg-slate-200 text-slate-800 rounded-xl font-extrabold text-sm shadow disabled:opacity-50"
+                aria-label="Abrir câmera para ler QR Code Pix"
+                title="Câmera — QR Code Pix"
+              >
+                ◼
               </button>
             </div>
           </div>
@@ -405,7 +504,7 @@ export default function AssistenteCarameloApp() {
             <div className="relative bg-white text-slate-900 rounded-2xl rounded-tl-none px-4 py-3 text-sm font-medium leading-snug shadow-lg">
               <span className="absolute -left-2 top-3 w-0 h-0 border-t-8 border-t-transparent border-r-8 border-r-white border-b-0" aria-hidden="true" />
               <p className="font-bold text-[#0038A8] text-xs mb-1 uppercase tracking-wide">
-                {metadata.active_agent}
+                {agentLabel(metadata.active_agent)}
                 <span className="ml-2 text-emerald-600 font-mono normal-case">
                   {(metadata.confidence_score * 100).toFixed(0)}% confiança
                 </span>
@@ -435,7 +534,7 @@ export default function AssistenteCarameloApp() {
           <h2 className="text-xl font-bold text-white mt-0.5">Orquestrador Multiagente (LangGraph)</h2>
         </div>
 
-        {/* 4 Atos do Pitch */}
+        {/* 6 Atos do Pitch */}
         <div className="space-y-2">
           <p className="text-xs font-bold text-slate-300 uppercase">🎬 Cenários do Pitch:</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
@@ -474,7 +573,48 @@ export default function AssistenteCarameloApp() {
               <span className="text-xs font-bold text-red-300 block">Ato 4: Guardião Antigolpe</span>
               <span className="text-sm font-semibold text-white">"Pix p/ liberar INSS bloqueado"</span>
             </button>
+
+            <button
+              onClick={() => callBackend("Quero ver meu extrato, tem um débito que não reconheço")}
+              disabled={isLoading}
+              className="p-3 bg-purple-600/20 hover:bg-purple-600/30 border border-purple-400/40 rounded-xl text-left transition disabled:opacity-50"
+            >
+              <span className="text-xs font-bold text-purple-300 block">Ato 5: Assistente de Extrato</span>
+              <span className="text-sm font-semibold text-white">"Esse débito, eu reconheço?"</span>
+            </button>
+
+            <button
+              onClick={() => callBackend("Ler QR Code Pix", "FOTO_QRCODE_PIX")}
+              disabled={isLoading}
+              className="p-3 bg-teal-600/20 hover:bg-teal-600/30 border border-teal-400/40 rounded-xl text-left transition disabled:opacity-50"
+            >
+              <span className="text-xs font-bold text-teal-300 block">Ato 6: Visão — QR Code Pix</span>
+              <span className="text-sm font-semibold text-white">📷 Câmera → QR Code Pix</span>
+            </button>
           </div>
+        </div>
+
+        {/* Seletor de Personas */}
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-slate-300 uppercase">👤 Trocar Persona (Demo):</p>
+          <div className="flex gap-2">
+            {DEMO_PROFILES.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => switchProfile(p)}
+                disabled={isLoading}
+                title={p.description}
+                className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition disabled:opacity-50 ${
+                  activeProfile.id === p.id
+                    ? 'bg-yellow-400 text-slate-950 ring-2 ring-yellow-300'
+                    : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+                }`}
+              >
+                {p.emoji} {p.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-slate-500 italic">{activeProfile.description}</p>
         </div>
 
         {/* Input livre */}
@@ -503,11 +643,20 @@ export default function AssistenteCarameloApp() {
         <div>
           <div className="flex justify-between items-center mb-1.5">
             <span className="text-xs font-bold text-slate-400 uppercase">
-              Contrato JSON — {metadata.active_agent}
+              Contrato JSON — {agentLabel(metadata.active_agent)}
             </span>
-            <span className="text-xs font-mono" style={{ color: security_guardian.risk_level === 'CRITICAL' ? '#f87171' : security_guardian.risk_level === 'HIGH' ? '#fbbf24' : '#34d399' }}>
-              risco: {security_guardian.risk_level}
-            </span>
+            <div className="flex items-center gap-2">
+              {metadata.risk_score != null && (
+                <span className="text-xs font-mono text-slate-400">
+                  score: <span style={{ color: security_guardian.risk_level === 'CRITICAL' ? '#f87171' : security_guardian.risk_level === 'HIGH' ? '#fbbf24' : security_guardian.risk_level === 'MEDIUM' ? '#fb923c' : '#34d399' }}>
+                    {metadata.risk_score}/100
+                  </span>
+                </span>
+              )}
+              <span className="text-xs font-mono" style={{ color: security_guardian.risk_level === 'CRITICAL' ? '#f87171' : security_guardian.risk_level === 'HIGH' ? '#fbbf24' : security_guardian.risk_level === 'MEDIUM' ? '#fb923c' : '#34d399' }}>
+                risco: {RISK_LABELS[security_guardian.risk_level] ?? security_guardian.risk_level}
+              </span>
+            </div>
           </div>
           <pre className="bg-slate-950 text-emerald-400 p-4 rounded-xl text-xs font-mono overflow-x-auto max-h-60 border border-slate-800">
             {JSON.stringify(agentState, null, 2)}
@@ -515,6 +664,14 @@ export default function AssistenteCarameloApp() {
         </div>
 
       </div>
+
+      {/* Modal de câmera real */}
+      <CameraModal
+        open={cameraOpen}
+        onClose={() => setCameraOpen(false)}
+        onCapture={handleCameraCapture}
+        defaultMode={cameraMode}
+      />
     </div>
   );
 }
