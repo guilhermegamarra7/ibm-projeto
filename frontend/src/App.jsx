@@ -248,7 +248,8 @@ export default function AssistenteCarameloApp() {
   })();
 
   const isEmergency = ui_control.ui_mode === "ZERO_UI_EMERGENCY_LOCK";
-  const isZeroUI    = ui_control.ui_mode !== "STANDARD";
+  const isSuccess   = ui_control.ui_mode === "ZERO_UI_SUCCESS";
+  const isZeroUI    = ui_control.ui_mode !== "STANDARD" && !isSuccess;
 
   return (
     <div className="min-h-screen bg-slate-900 text-white p-4 md:p-8 flex flex-col lg:flex-row gap-8 items-center justify-center font-sans">
@@ -272,9 +273,9 @@ export default function AssistenteCarameloApp() {
           </span>
         </div>
 
-        {/* Barra do assistente + legenda TTS */}
+        {/* Barra do assistente + legenda TTS — oculta na tela de sucesso */}
         <div
-          className={`px-4 py-3 border-b flex flex-col gap-2 transition-colors duration-300 ${isEmergency ? "bg-red-900 text-white" : "bg-[#0038A8] text-white"}`}
+          className={`px-4 py-3 border-b flex flex-col gap-2 transition-colors duration-300 ${isSuccess ? "hidden" : ""} ${isEmergency ? "bg-red-900 text-white" : "bg-[#0038A8] text-white"}`}
           aria-live="polite"
           aria-label="Mensagem do assistente"
         >
@@ -486,6 +487,47 @@ export default function AssistenteCarameloApp() {
                   👤 Falar com Atendente do BB
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* MODO SUCESSO — tela verde após confirmação */}
+          {ui_control.ui_mode === "ZERO_UI_SUCCESS" && ui_control.zero_ui_Dynamic_Component && (
+            <div className="flex-1 bg-emerald-50 flex flex-col items-center justify-center p-6 text-center gap-4">
+              {/* Ícone grande de sucesso */}
+              <div className="w-24 h-24 rounded-full bg-emerald-500 flex items-center justify-center shadow-xl">
+                <span className="text-5xl" aria-hidden="true">✓</span>
+              </div>
+
+              <h2 className="text-2xl font-black text-emerald-700 leading-tight">
+                {ui_control.zero_ui_Dynamic_Component.title}
+              </h2>
+              <p className="text-base text-emerald-600 font-semibold">
+                {ui_control.zero_ui_Dynamic_Component.subtitle}
+              </p>
+
+              {/* Comprovante mini */}
+              {ui_control.form_state.amount > 0 && (
+                <div className="w-full bg-white border border-emerald-200 rounded-2xl p-4 text-left space-y-1 shadow-sm">
+                  <p className="text-xs text-slate-500 uppercase font-bold">Comprovante</p>
+                  <p className="text-2xl font-black text-emerald-700">
+                    R$ {ui_control.form_state.amount.toFixed(2).replace('.', ',')}
+                  </p>
+                  {ui_control.form_state.recipient_name && (
+                    <p className="text-sm text-slate-600">Para: <strong>{ui_control.form_state.recipient_name}</strong></p>
+                  )}
+                  <p className="text-xs text-slate-400 mt-1">{new Date().toLocaleString('pt-BR')}</p>
+                </div>
+              )}
+
+              {ui_control.zero_ui_Dynamic_Component.options.map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => callBackend(opt.action_Command)}
+                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-base rounded-2xl shadow-lg active:scale-95 transition"
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           )}
 

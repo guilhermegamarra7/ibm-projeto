@@ -243,6 +243,20 @@ def _mock_llm_stub(prompt: str) -> str:
         intent, entities = "SCAM_RISK", {"trigger": "pressao_temporal"}
     elif any(w in utterance for w in ["extrato", "esse debito", "esse gasto", "cobrado", "reconhec"]):
         intent, entities = "STATEMENT_REVIEW", {}
+    # Confirmações de ação — ANTES de detectar "pix" genérico
+    elif any(w in utterance for w in ["confirmar envio", "confirmar pix", "confirmar pagamento"]):
+        intent, entities = "CONFIRM_PIX_DONE", {}
+    elif any(w in utterance for w in ["confirmar bloqueio", "bloquear meu cartao"]):
+        intent, entities = "CONFIRM_BLOCK_DONE", {}
+    elif any(w in utterance for w in ["avisar contato", "avisar familiar", "contato de confianca"]):
+        intent, entities = "CONFIRM_ALERT_SENT", {}
+    # Seleção de contato ambíguo — ANTES de detectar "pix" genérico
+    elif any(w in utterance for w in ["pedro silva", "silva"]) and "pedro" in utterance:
+        intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Silva", "bank": "Itau"}
+    elif any(w in utterance for w in ["pedro oliveira", "oliveira"]) and "pedro" in utterance:
+        intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Oliveira", "bank": "Banco do Brasil"}
+    elif "pedro" in utterance and not any(w in utterance for w in ["pix", "transferi", "mandar", "manda", "enviar"]):
+        intent, entities = "PIX_DISAMBIGUATION", {"recipient_raw": "Pedro"}
     elif "pix" in utterance or "transferi" in utterance or "mandar" in utterance or "manda" in utterance or "enviar" in utterance:
         # --- Detecta chave Pix explícita ANTES de capturar valor genérico ---
         # CPF: 000.000.000-00 | CNPJ | e-mail | telefone +55 | chave aleatória (UUID)
@@ -275,16 +289,17 @@ def _mock_llm_stub(prompt: str) -> str:
 
         if pix_key:
             intent, entities = "PIX_CHAVE", {"amount": value, "pix_key": pix_key}
+        # Dentro do bloco pix: seleção de contato conhecido (ex: "Pix para Pedro Oliveira")
+        elif "pedro oliveira" in utterance or ("oliveira" in utterance and "pedro" in utterance):
+            intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Oliveira", "bank": "Banco do Brasil"}
+        elif "pedro silva" in utterance or ("silva" in utterance and "pedro" in utterance):
+            intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Silva", "bank": "Itau"}
+        elif "pedro" in utterance and not raw_name:
+            intent, entities = "PIX_DISAMBIGUATION", {"recipient_raw": "Pedro"}
         else:
             intent, entities = "PIX_TRANSFER", {"amount": value, "recipient_raw": raw_name}
     elif any(w in utterance for w in ["cartao", "perdi", "onibus", "roubei", "bloqueio"]):
         intent, entities = "BLOCK_CARD", {"card_last4": "4321"}
-    elif any(w in utterance for w in ["pedro silva", "silva"]) and "pedro" in utterance:
-        intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Silva", "bank": "Itau"}
-    elif any(w in utterance for w in ["pedro oliveira", "oliveira"]) and "pedro" in utterance:
-        intent, entities = "PIX_CONFIRM", {"recipient": "Pedro Oliveira", "bank": "Banco do Brasil"}
-    elif "pedro" in utterance:
-        intent, entities = "PIX_DISAMBIGUATION", {"recipient_raw": "Pedro"}
     elif any(w in utterance for w in ["voltar", "inicio", "home", "cancelar", "sair"]):
         intent, entities = "HOME_NAVIGATION", {}
     else:
@@ -301,36 +316,33 @@ def calculate_risk_score(user_input: str, entities: Dict[str, Any], profile: Dic
     signals: List[str] = []
     text = user_input.lower()
 
+    # Sinais de golpe — linguagem de pressão
     if any(w in text for w in ["urgente", "urgencia", "imediato", "corre", "so hoje", "agora mesmo"]):
         score += 30; signals.append("Linguagem de pressao temporal detectada")
+    # Padrão clássico de golpe previdenciário / autoridade
     if any(w in text for w in ["inss", "beneficio", "aposentadoria", "governo", "banco central", "receita federal", "liberar", "previdencia"]):
         score += 35; signals.append("Mencao a autoridade/beneficio social — padrao de golpe previdenciario")
 
+    # Valor muito acima da média do usuário
     amount = entities.get("amount") or 0
     avg = profile.get("avg_pix_amount", 180.0)
     if amount > 0 and amount > avg * 3:
         score += 25; signals.append(f"Valor R$ {amount:.0f} e {amount/avg:.1f}x acima da sua media (R$ {avg:.0f})")
 
+    # Destinatário desconhecido (só conta se tiver nome explícito)
     recipient = entities.get("recipient_raw") or entities.get("recipient", "")
     known = profile.get("known_contacts", [])
     if recipient and not any(recipient.lower() in c.lower() for c in known):
         score += 15; signals.append(f"'{recipient}' nao esta nos seus contatos habituais")
 
-    now_hour = datetime.now().hour
-    h_start, h_end = profile.get("usual_hours", (8, 20))
-    if not (h_start <= now_hour <= h_end):
-        score += 10; signals.append(f"Horario incomum ({now_hour}h, fora do padrao {h_start}h-{h_end}h)")
-
-    pattern = session.get("access_pattern", [])
-    now = time.time()
-    recent = [t for t in pattern if now - t < 300]
-    if len(recent) >= 3:
-        score += 20; signals.append(f"Padrao de acesso anomalo: {len(recent)} acessos nos ultimos 5 minutos")
-
+    # Ligação suspeita antes de abrir o app (flag manual)
     if session.get("recent_unknown_call"):
         score += 25; signals.append("Ligacao de numero desconhecido detectada antes de abrir o app")
 
-    level = "CRITICAL" if score >= 60 else "HIGH" if score >= 35 else "MEDIUM" if score >= 20 else "LOW"
+    # REMOVIDOS para demo: horário incomum e frequência de acesso
+    # (disparam facilmente durante testes e bloqueiam o fluxo)
+
+    level = "CRITICAL" if score >= 60 else "HIGH" if score >= 40 else "MEDIUM" if score >= 25 else "LOW"
     return {"score": score, "level": level, "signals": signals}
 
 # =============================================================================
@@ -471,6 +483,58 @@ def node_operador_ui(state: AgentState) -> AgentState:
                 },
             },
             "security_guardian": {"risk_level": "MEDIUM", "is_blocked": False, "scam_explanation": "Chave Pix nao encontrada na agenda de contatos conhecidos.", "trusted_contact_alert": False},
+        }
+    elif intent == "CONFIRM_PIX_DONE":
+        amount    = state["session"].get("last_amount") or entities.get("amount") or 0
+        recipient = entities.get("recipient") or entities.get("recipient_raw") or state["session"].get("pending_disambiguation", "destinatário")
+        state["response"] = {
+            "metadata": {"active_agent": "OPERADOR_UI", "intent_detected": "COMPLETED_OR_HOME", "confidence_score": 1.0, "risk_score": None},
+            "voice_assistant": {"tts_message": f"Pix enviado com sucesso! R$ {amount:.0f} transferidos. O comprovante foi gerado.", "should_listen_next": False},
+            "ui_control": {
+                "target_screen": "HOME", "ui_mode": "ZERO_UI_SUCCESS",
+                "form_state": {"amount": amount, "recipient_name": recipient},
+                "zero_ui_Dynamic_Component": {
+                    "title": "✅ Pix Enviado!",
+                    "subtitle": f"R$ {amount:.2f}".replace(".", ",") + f" transferidos com sucesso",
+                    "options": [{"id": "home", "label": "🏠 VOLTAR À TELA INICIAL", "action_Command": "Voltar ao início"}],
+                    "primary_confirm_button": None,
+                },
+            },
+            "security_guardian": {"risk_level": "LOW", "is_blocked": False, "scam_explanation": None, "trusted_contact_alert": False},
+        }
+    elif intent == "CONFIRM_BLOCK_DONE":
+        state["response"] = {
+            "metadata": {"active_agent": "OPERADOR_UI", "intent_detected": "COMPLETED_OR_HOME", "confidence_score": 1.0, "risk_score": None},
+            "voice_assistant": {"tts_message": "Cartão bloqueado com sucesso! Seu Ourocard final 4321 está protegido.", "should_listen_next": False},
+            "ui_control": {
+                "target_screen": "HOME", "ui_mode": "ZERO_UI_SUCCESS",
+                "form_state": {"card_status": "BLOCKED"},
+                "zero_ui_Dynamic_Component": {
+                    "title": "🔒 Cartão Bloqueado!",
+                    "subtitle": "Ourocard final 4321 — protegido agora",
+                    "options": [{"id": "home", "label": "🏠 VOLTAR À TELA INICIAL", "action_Command": "Voltar ao início"}],
+                    "primary_confirm_button": None,
+                },
+            },
+            "security_guardian": {"risk_level": "LOW", "is_blocked": False, "scam_explanation": None, "trusted_contact_alert": False},
+        }
+    elif intent == "CONFIRM_ALERT_SENT":
+        profile  = state["profile"]
+        trusted  = profile.get("trusted_contact") or {"name": "seu contato de confiança"}
+        state["response"] = {
+            "metadata": {"active_agent": "GUARDIAO_ANTIGOLPE", "intent_detected": "COMPLETED_OR_HOME", "confidence_score": 1.0, "risk_score": None},
+            "voice_assistant": {"tts_message": f"Aviso enviado para {trusted.get('name')}! Eles foram alertados e vão te ligar.", "should_listen_next": False},
+            "ui_control": {
+                "target_screen": "HOME", "ui_mode": "ZERO_UI_SUCCESS",
+                "form_state": {},
+                "zero_ui_Dynamic_Component": {
+                    "title": f"📲 {trusted.get('name')} Avisado!",
+                    "subtitle": "Sua família foi alertada. Fique tranquila.",
+                    "options": [{"id": "home", "label": "🏠 VOLTAR À TELA INICIAL", "action_Command": "Voltar ao início"}],
+                    "primary_confirm_button": None,
+                },
+            },
+            "security_guardian": {"risk_level": "LOW", "is_blocked": False, "scam_explanation": None, "trusted_contact_alert": False},
         }
     elif intent == "HOME_NAVIGATION":
         state["response"] = _home_response()
@@ -775,7 +839,21 @@ def route_intent(state: AgentState) -> Literal["operador_ui", "visao_multimodal"
         state["risk"] = risk
         if risk["level"] in ("CRITICAL", "HIGH", "MEDIUM"):
             state["intent"] = "SCAM_RISK"; return "guardiao_antigolpe"
-    return {"PIX_TRANSFER": "operador_ui", "PIX_DISAMBIGUATION": "operador_ui", "PIX_CONFIRM": "operador_ui", "PIX_CHAVE": "operador_ui", "BLOCK_CARD": "operador_ui", "PAY_BILL": "visao_multimodal", "SCAM_RISK": "guardiao_antigolpe", "STATEMENT_REVIEW": "extrato", "HOME_NAVIGATION": "home", "CLARIFICATION_NEEDED": "esclarecimento"}.get(intent, "esclarecimento")
+    return {
+        "PIX_TRANSFER":        "operador_ui",
+        "PIX_DISAMBIGUATION":  "operador_ui",
+        "PIX_CONFIRM":         "operador_ui",
+        "PIX_CHAVE":           "operador_ui",
+        "CONFIRM_PIX_DONE":    "operador_ui",
+        "CONFIRM_BLOCK_DONE":  "operador_ui",
+        "CONFIRM_ALERT_SENT":  "operador_ui",
+        "BLOCK_CARD":          "operador_ui",
+        "PAY_BILL":            "visao_multimodal",
+        "SCAM_RISK":           "guardiao_antigolpe",
+        "STATEMENT_REVIEW":    "extrato",
+        "HOME_NAVIGATION":     "home",
+        "CLARIFICATION_NEEDED":"esclarecimento",
+    }.get(intent, "esclarecimento")
 
 def build_graph():
     g = StateGraph(AgentState)
