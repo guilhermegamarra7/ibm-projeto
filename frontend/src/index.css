@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mascote bounce animation */
+@keyframes mascote-bounce {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-6px); }
+}
+.mascote-bounce {
+  animation: mascote-bounce 1.6s ease-in-out infinite;
+}
+
+/* Mascote pulse animation (alerta) */
+@keyframes mascote-pulse-scale {
+  0%, 100% { transform: scale(1); }
+  50%       { transform: scale(1.12); }
+}
+.mascote-alert {
+  animation: mascote-pulse-scale 0.7s ease-in-out infinite;
+}
+
+/* Mic ring ping animation (welcome screen) */
+@keyframes ping {
+  0%   { transform: scale(0.8); opacity: 0.8; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
